@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gesture Filters</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+    }
+
+    #stage {
+      position: fixed;
+      inset: 0;
+      background: #000;
+    }
+
+    #output {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      background: #000;
+    }
+
+    #camera {
+      display: none;
+    }
+
+    #hud {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+    }
+
+    #panel {
+      width: min(92vw, 430px);
+      padding: 22px;
+      border-radius: 20px;
+      background: rgba(10, 10, 10, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(18px);
+      text-align: center;
+      pointer-events: auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 1.35rem;
+      font-weight: 650;
+    }
+
+    p {
+      margin: 0 0 16px;
+      color: rgba(255, 255, 255, 0.76);
+      line-height: 1.45;
+    }
+
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: #fff;
+      color: #000;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    #status {
+      position: fixed;
+      left: 18px;
+      bottom: 18px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.52);
+      color: rgba(255, 255, 255, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      font-size: 0.92rem;
+      backdrop-filter: blur(12px);
+    }
+
+    #status.ready {
+      color: #fff;
+    }
+
+    #status.error {
+      color: #ffd3d3;
+      border-color: rgba(255, 120, 120, 0.35);
+    }
+
+    #hint {
+      position: fixed;
+      top: 18px;
+      right: 18px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.52);
+      color: rgba(255, 255, 255, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      font-size: 0.92rem;
+      backdrop-filter: blur(12px);
+    }
+
+    #gesture {
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.52);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      font-size: 0.92rem;
+      backdrop-filter: blur(12px);
+    }
+
+    #stop {
+      position: fixed;
+      left: 18px;
+      bottom: 70px;
+      pointer-events: auto;
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      backdrop-filter: blur(12px);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <main id="stage">
+    <video id="camera" autoplay playsinline muted></video>
+    <canvas id="output"></canvas>
+  </main>
+
+  <div id="hud">
+    <section id="panel">
+      <h1>Gesture filters</h1>
+      <p>Start the camera, then try a fist, thumbs up, peace sign, index finger, or open hand. Each pose applies a different live filter.</p>
+      <button id="start">Start camera</button>
+    </section>
+  </div>
+
+  <div id="gesture">Gesture: none</div>
+  <div id="hint">Fist · Thumbs up · Peace · Index · Open hand</div>
+  <button id="stop" class="hidden">Stop</button>
+  <div id="status">Waiting to start…</div>
+
+  <script type="module">
+    import {
+      FilesetResolver,
+      HandLandmarker,
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
+
+    const video = document.querySelector("#camera");
+    const canvas = document.querySelector("#output");
+    const ctx = canvas.getContext("2d");
+    const startButton = document.querySelector("#start");
+    const stopButton = document.querySelector("#stop");
+    const panel = document.querySelector("#panel");
+    const status = document.querySelector("#status");
+    const gestureBadge = document.querySelector("#gesture");
+
+    const GESTURE_LABELS = {
+      none: "none",
+      fist: "fist · dither",
+      thumbsUp: "thumbs up · volumetric light",
+      peace: "peace · VHS",
+      index: "pointing finger · spotlight",
+      open: "open hand · water ripple",
+    };
+
+    const frameCanvas = document.createElement("canvas");
+    const frameCtx = frameCanvas.getContext("2d");
+    const ditherCanvas = document.createElement("canvas");
+    const ditherCtx = ditherCanvas.getContext("2d", { willReadFrequently: true });
+    const rippleCanvas = document.createElement("canvas");
+    const rippleCtx = rippleCanvas.getContext("2d");
+
+    let handLandmarker;
+    let running = false;
+    let lastVideoTime = -1;
+    let lastTip = null;
+    let lastThumbTip = null;
+    let stableGesture = "none";
+    let pendingGesture = "none";
+    let pendingFrames = 0;
+    let mediaStream = null;
+
+    function setStatus(message, tone = "") {
+      status.textContent = message;
+      status.className = tone;
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+
+      canvas.width = Math.floor(viewportWidth * dpr);
+      canvas.height = Math.floor(viewportHeight * dpr);
+      canvas.style.width = `${viewportWidth}px`;
+      canvas.style.height = `${viewportHeight}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      frameCanvas.width = viewportWidth;
+      frameCanvas.height = viewportHeight;
+      rippleCanvas.width = viewportWidth;
+      rippleCanvas.height = viewportHeight;
+      ditherCanvas.width = Math.max(1, Math.floor(viewportWidth / 4));
+      ditherCanvas.height = Math.max(1, Math.floor(viewportHeight / 4));
+    }
+
+    function getCoverRect(videoWidth, videoHeight, viewportWidth, viewportHeight) {
+      const scale = Math.max(viewportWidth / videoWidth, viewportHeight / videoHeight);
+      const width = videoWidth * scale;
+      const height = videoHeight * scale;
+      return {
+        x: (viewportWidth - width) / 2,
+        y: (viewportHeight - height) / 2,
+        width,
+        height,
+      };
+    }
+
+    function distance(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    function angleAt(a, b, c) {
+      const ab = { x: a.x - b.x, y: a.y - b.y };
+      const cb = { x: c.x - b.x, y: c.y - b.y };
+      const dot = ab.x * cb.x + ab.y * cb.y;
+      const abLength = Math.hypot(ab.x, ab.y);
+      const cbLength = Math.hypot(cb.x, cb.y);
+
+      if (!abLength || !cbLength) return 0;
+
+      const cosine = Math.min(1, Math.max(-1, dot / (abLength * cbLength)));
+      return Math.acos(cosine) * (180 / Math.PI);
+    }
+
+    function fingerExtended(landmarks, mcp, pip, tip) {
+      const straightness = angleAt(landmarks[mcp], landmarks[pip], landmarks[tip]);
+      const wristToTip = distance(landmarks[0], landmarks[tip]);
+      const wristToPip = distance(landmarks[0], landmarks[pip]);
+      return straightness > 150 && wristToTip > wristToPip * 1.12;
+    }
+
+    function thumbExtendedUp(landmarks) {
+      const thumbStraightness = angleAt(landmarks[2], landmarks[3], landmarks[4]);
+      const wristToThumbTip = distance(landmarks[0], landmarks[4]);
+      const wristToThumbMcp = distance(landmarks[0], landmarks[2]);
+      const palmWidth = distance(landmarks[5], landmarks[17]);
+      const liftedAboveIndexBase = landmarks[4].y < landmarks[5].y - palmWidth * 0.15;
+      return thumbStraightness > 145 && wristToThumbTip > wristToThumbMcp * 1.28 && liftedAboveIndexBase;
+    }
+
+    function classifyGesture(landmarks) {
+      if (!landmarks) return "none";
+
+      const extended = {
+        index: fingerExtended(landmarks, 5, 6, 8),
+        middle: fingerExtended(landmarks, 9, 10, 12),
+        ring: fingerExtended(landmarks, 13, 14, 16),
+        pinky: fingerExtended(landmarks, 17, 18, 20),
+      };
+
+      const signature = [
+        extended.index,
+        extended.middle,
+        extended.ring,
+        extended.pinky,
+      ].map(Boolean).join("");
+
+      switch (signature) {
+        case "falsefalsefalsefalse":
+          return thumbExtendedUp(landmarks) ? "thumbsUp" : "fist";
+        case "truefalsefalsefalse":
+          return "index";
+        case "truetruefalsefalse":
+          return "peace";
+        case "truetruetruetrue":
+          return "open";
+        default:
+          return "none";
+      }
+    }
+
+    function updateStableGesture(nextGesture) {
+      if (nextGesture === pendingGesture) {
+        pendingFrames += 1;
+      } else {
+        pendingGesture = nextGesture;
+        pendingFrames = 1;
+      }
+
+      if (pendingFrames >= 4 && stableGesture !== pendingGesture) {
+        stableGesture = pendingGesture;
+        gestureBadge.textContent = `Gesture: ${GESTURE_LABELS[stableGesture]}`;
+      }
+    }
+
+    function drawSourceFrame(rect) {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      frameCtx.clearRect(0, 0, viewportWidth, viewportHeight);
+      frameCtx.save();
+      frameCtx.translate(viewportWidth, 0);
+      frameCtx.scale(-1, 1);
+      frameCtx.drawImage(video, viewportWidth - rect.x - rect.width, rect.y, rect.width, rect.height);
+      frameCtx.restore();
+    }
+
+    function drawDitherEffect(viewportWidth, viewportHeight) {
+      ditherCtx.clearRect(0, 0, ditherCanvas.width, ditherCanvas.height);
+      ditherCtx.drawImage(frameCanvas, 0, 0, ditherCanvas.width, ditherCanvas.height);
+
+      const imageData = ditherCtx.getImageData(0, 0, ditherCanvas.width, ditherCanvas.height);
+      const data = imageData.data;
+      const matrix = [
+        [0, 8, 2, 10],
+        [12, 4, 14, 6],
+        [3, 11, 1, 9],
+        [15, 7, 13, 5],
+      ];
+
+      for (let y = 0; y < ditherCanvas.height; y += 1) {
+        for (let x = 0; x < ditherCanvas.width; x += 1) {
+          const offset = (y * ditherCanvas.width + x) * 4;
+          const luminance = data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114;
+          const threshold = ((matrix[y % 4][x % 4] + 0.5) / 16) * 255;
+          const value = luminance > threshold ? 255 : 0;
+          data[offset] = value;
+          data[offset + 1] = value;
+          data[offset + 2] = value;
+        }
+      }
+
+      ditherCtx.putImageData(imageData, 0, 0);
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(ditherCanvas, 0, 0, viewportWidth, viewportHeight);
+      ctx.restore();
+    }
+
+    function drawVhsEffect(viewportWidth, viewportHeight, time) {
+      const jitter = Math.sin(time * 0.014) * 3 + (Math.random() - 0.5) * 2;
+
+      ctx.save();
+      ctx.filter = "contrast(1.12) saturate(1.35)";
+      ctx.drawImage(frameCanvas, jitter, 0, viewportWidth, viewportHeight);
+      ctx.globalCompositeOperation = "screen";
+      ctx.globalAlpha = 0.34;
+      ctx.filter = "sepia(1) saturate(6) hue-rotate(-28deg)";
+      ctx.drawImage(frameCanvas, jitter + 5, 0, viewportWidth, viewportHeight);
+      ctx.filter = "sepia(1) saturate(6) hue-rotate(170deg)";
+      ctx.drawImage(frameCanvas, jitter - 5, 0, viewportWidth, viewportHeight);
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+      for (let y = 0; y < viewportHeight; y += 4) {
+        ctx.fillRect(0, y, viewportWidth, 1);
+      }
+      ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+      for (let y = 2; y < viewportHeight; y += 6) {
+        ctx.fillRect(0, y, viewportWidth, 1);
+      }
+      ctx.restore();
+    }
+
+    function drawSpotlightEffect(viewportWidth, viewportHeight, rect) {
+      ctx.drawImage(frameCanvas, 0, 0, viewportWidth, viewportHeight);
+
+      const centerX = lastTip ? rect.x + (1 - lastTip.x) * rect.width : viewportWidth / 2;
+      const centerY = lastTip ? rect.y + lastTip.y * rect.height : viewportHeight / 2;
+      const radius = Math.max(viewportWidth, viewportHeight) * 0.24;
+      const gradient = ctx.createRadialGradient(centerX, centerY, radius * 0.08, centerX, centerY, radius);
+      gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
+      gradient.addColorStop(0.52, "rgba(0, 0, 0, 0.16)");
+      gradient.addColorStop(1, "rgba(0, 0, 0, 0.88)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, viewportWidth, viewportHeight);
+    }
+
+    function drawVolumetricLightingEffect(viewportWidth, viewportHeight, rect, time) {
+      ctx.save();
+      ctx.filter = "brightness(0.82) contrast(1.08) saturate(1.1)";
+      ctx.drawImage(frameCanvas, 0, 0, viewportWidth, viewportHeight);
+      ctx.restore();
+
+      const sourceX = lastThumbTip ? rect.x + (1 - lastThumbTip.x) * rect.width : viewportWidth * 0.5;
+      const sourceY = lastThumbTip ? rect.y + lastThumbTip.y * rect.height : viewportHeight * 0.42;
+      const pulse = 0.92 + Math.sin(time * 0.004) * 0.08;
+      const glowRadius = Math.max(viewportWidth, viewportHeight) * 0.34 * pulse;
+      const glow = ctx.createRadialGradient(sourceX, sourceY, 0, sourceX, sourceY, glowRadius);
+      glow.addColorStop(0, "rgba(255, 246, 214, 0.95)");
+      glow.addColorStop(0.16, "rgba(255, 231, 164, 0.45)");
+      glow.addColorStop(0.48, "rgba(255, 210, 115, 0.16)");
+      glow.addColorStop(1, "rgba(255, 210, 115, 0)");
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, viewportWidth, viewportHeight);
+
+      const beamLength = Math.max(viewportWidth, viewportHeight) * 1.05;
+      const beamCount = 9;
+      for (let i = 0; i < beamCount; i += 1) {
+        const spread = -0.52 + (i / (beamCount - 1)) * 1.04;
+        const angle = -Math.PI / 2 + spread + Math.sin(time * 0.0015 + i) * 0.035;
+        const endX = sourceX + Math.cos(angle) * beamLength;
+        const endY = sourceY + Math.sin(angle) * beamLength;
+        const width = 34 + (i % 3) * 18;
+        const beam = ctx.createLinearGradient(sourceX, sourceY, endX, endY);
+        beam.addColorStop(0, "rgba(255, 238, 186, 0.22)");
+        beam.addColorStop(1, "rgba(255, 238, 186, 0)");
+
+        ctx.beginPath();
+        ctx.moveTo(sourceX, sourceY);
+        ctx.lineTo(endX + Math.cos(angle + Math.PI / 2) * width, endY + Math.sin(angle + Math.PI / 2) * width);
+        ctx.lineTo(endX - Math.cos(angle + Math.PI / 2) * width, endY - Math.sin(angle + Math.PI / 2) * width);
+        ctx.closePath();
+        ctx.fillStyle = beam;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawWaterRippleEffect(viewportWidth, viewportHeight, time) {
+      rippleCtx.clearRect(0, 0, viewportWidth, viewportHeight);
+      const stripHeight = 4;
+      for (let y = 0; y < viewportHeight; y += stripHeight) {
+        const offset = Math.sin(y * 0.035 + time * 0.006) * 12;
+        rippleCtx.drawImage(
+          frameCanvas,
+          0,
+          y,
+          viewportWidth,
+          stripHeight,
+          offset,
+          y,
+          viewportWidth,
+          stripHeight
+        );
+      }
+      ctx.drawImage(rippleCanvas, 0, 0, viewportWidth, viewportHeight);
+    }
+
+    function drawFrame(time = performance.now()) {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      ctx.clearRect(0, 0, viewportWidth, viewportHeight);
+
+      if (!video.videoWidth || !video.videoHeight) return;
+
+      const rect = getCoverRect(video.videoWidth, video.videoHeight, viewportWidth, viewportHeight);
+      drawSourceFrame(rect);
+
+      switch (stableGesture) {
+        case "fist":
+          drawDitherEffect(viewportWidth, viewportHeight);
+          break;
+        case "peace":
+          drawVhsEffect(viewportWidth, viewportHeight, time);
+          break;
+        case "index":
+          drawSpotlightEffect(viewportWidth, viewportHeight, rect);
+          break;
+        case "open":
+          drawWaterRippleEffect(viewportWidth, viewportHeight, time);
+          break;
+        case "thumbsUp":
+          drawVolumetricLightingEffect(viewportWidth, viewportHeight, rect, time);
+          break;
+        default:
+          ctx.drawImage(frameCanvas, 0, 0, viewportWidth, viewportHeight);
+      }
+
+      if (lastTip) {
+        const x = rect.x + (1 - lastTip.x) * rect.width;
+        const y = rect.y + lastTip.y * rect.height;
+
+        ctx.beginPath();
+        ctx.arc(x, y, 12, 0, Math.PI * 2);
+        ctx.fillStyle = "white";
+        ctx.shadowColor = "rgba(255, 255, 255, 0.9)";
+        ctx.shadowBlur = 18;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    async function createHandLandmarker() {
+      setStatus("Loading MediaPipe Hands…");
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
+      );
+
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        },
+        runningMode: "VIDEO",
+        numHands: 1,
+        minHandDetectionConfidence: 0.6,
+        minHandPresenceConfidence: 0.6,
+        minTrackingConfidence: 0.6,
+      });
+    }
+
+    async function startCamera() {
+      startButton.disabled = true;
+
+      try {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch {
+        // Fullscreen may be blocked by the browser; tracking still works.
+      }
+
+      try {
+        if (!handLandmarker) {
+          await createHandLandmarker();
+        }
+
+        setStatus("Requesting webcam access…");
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "user",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        mediaStream = stream;
+        panel.classList.add("hidden");
+        stopButton.classList.remove("hidden");
+        running = true;
+        setStatus("Tracking your hand", "ready");
+        renderLoop();
+      } catch (error) {
+        console.error(error);
+        setStatus("Could not start camera. Check webcam permission and try again.", "error");
+        startButton.disabled = false;
+      }
+    }
+
+    function stopCamera() {
+      running = false;
+      lastVideoTime = -1;
+      lastTip = null;
+      lastThumbTip = null;
+      stableGesture = "none";
+      pendingGesture = "none";
+      pendingFrames = 0;
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+      }
+
+      video.pause();
+      video.srcObject = null;
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      gestureBadge.textContent = "Gesture: none";
+      stopButton.classList.add("hidden");
+      panel.classList.remove("hidden");
+      startButton.disabled = false;
+      setStatus("Stopped", "");
+
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+
+    function renderLoop() {
+      if (!running) return;
+
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const result = handLandmarker.detectForVideo(video, performance.now());
+        const landmarks = result.landmarks?.[0] ?? null;
+        lastTip = landmarks?.[8] ?? null;
+        lastThumbTip = landmarks?.[4] ?? null;
+        updateStableGesture(classifyGesture(landmarks));
+        setStatus(
+          landmarks ? `Detected: ${GESTURE_LABELS[stableGesture]}` : "Show one hand to the camera",
+          landmarks ? "ready" : ""
+        );
+      }
+
+      drawFrame();
+      requestAnimationFrame(renderLoop);
+    }
+
+    window.addEventListener("resize", resizeCanvas);
+    document.addEventListener("fullscreenchange", resizeCanvas);
+    startButton.addEventListener("click", startCamera);
+    stopButton.addEventListener("click", stopCamera);
+    resizeCanvas();
+  </script>
+</body>
+</html>
