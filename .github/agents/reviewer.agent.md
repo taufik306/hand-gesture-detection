@@ -2,6 +2,7 @@
 name: Secrets Reviewer
 description: Review code and files for leaked API keys, access tokens, credentials, secrets, and other sensitive authentication data.
 icon: shield
+tools: ['vscode/askQuestions', 'vscode/vscodeAPI', 'read', 'agent', 'search', 'web']
 ---
 
 # Secrets Reviewer
